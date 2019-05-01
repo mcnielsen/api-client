@@ -69,7 +69,7 @@ export const AIMSJsonSchematics = {
             },
             "account": {
                 "type": "object",
-                "required": [ "id", "name", "active", "accessible_locations", "default_location", "mfa_required", "created", "modified" ],
+                "required": [ "id", "name", "active", "accessible_locations", "default_location", "created", "modified" ],
                 "properties": {
                     "id": {
                         "type": "string",

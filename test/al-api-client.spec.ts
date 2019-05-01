@@ -71,7 +71,7 @@ describe('When creating a URI for a given service ', () => {
         status: 200,
         body: JSON.stringify(responseBody),
       });
-      const endpoint = await ALClient.createURI({});
+      const endpoint = await ALClient.calculateURI({});
       expect(endpoint).to.deep.equals({
         host: `https://${serviceEndpoint}`,
         path: `/${serviceName}/v1`,
@@ -90,7 +90,7 @@ describe('When creating a URI for a given service ', () => {
         status: 200,
         body: JSON.stringify(responseBody),
       });
-      const endpoint = await ALClient.createURI({ service_name: serviceName, account_id: accountID, params: queryParams });
+      const endpoint = await ALClient.calculateURI({ service_name: serviceName, account_id: accountID, params: queryParams });
       expect(endpoint).to.deep.equals({
         host: `https://${serviceEndpoint}`,
         path: `/${serviceName}/v1/${accountID}?${qs.stringify(queryParams)}`,
@@ -103,7 +103,7 @@ describe('When creating a URI for a given service ', () => {
         status: 500,
         body: '',
       });
-      const endpoint = await ALClient.createURI({});
+      const endpoint = await ALClient.calculateURI({});
       expect(endpoint).to.deep.equals({
         host: 'https://api.global-integration.product.dev.alertlogic.com',
         path: '/aims/v1',

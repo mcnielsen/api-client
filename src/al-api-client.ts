@@ -9,7 +9,7 @@ import { AIMSSessionDescriptor, AIMSAccount } from './types/aims-stub.types';
 import { AlLocatorService, AlRequestDescriptor, AlLocationDescriptor, AlTriggerStream } from './utility';
 import { AlClientBeforeRequestEvent } from './events';
 
-interface EndPointResponse {
+interface AlApiTarget {
   host: string;
   path: string;
 }
@@ -17,13 +17,8 @@ interface EndPointResponse {
 /**
  * AlEndpointTarget defines the minimum data to use endpoints to resolve an API base location
  */
-export interface AlEndpointTarget {
-  account_id:string;
-  service_name:string;
-  endpoint_type:string;
-}
-
 export interface APIRequestParams {
+  location_strategy?:string;
   account_id?: string;
   residency?: string;
   service_name?: string;
@@ -40,23 +35,23 @@ export interface APIRequestParams {
 export class AlApiClient
 {
   public events:AlTriggerStream = new AlTriggerStream();
+  public verbose:boolean = false;
 
   /**
    * Service specific fallback params
    * ttl is 1 minute by default, consumers can set cache duration in requests
    */
   private defaultParams: APIRequestParams = {
-    account_id: '0',
-    // ("us" or "emea" or "default")
-    residency: 'default',
-    service_name: 'aims',
-    // ("api" or "ui")
-    endpoint_type: 'api',
-    version: 'v1',
-    data: {},
-    path: '',
-    params: {},
-    ttl: 60000,
+    location_strategy:  "insight/endpoints",
+    account_id:         '0',
+    residency:          'default',       // ("us" or "emea" or "default")
+    service_name:       'aims',         // ("api" or "ui")
+    endpoint_type:      'api',
+    version:            'v1',
+    data:               {},
+    path:               '',
+    params:             {},
+    ttl:                60000,
   };
 
   private cache = new cache(60000);
@@ -86,16 +81,7 @@ export class AlApiClient
    * Ensure that the params object is always fully populated for URL construction
    */
   public mergeParams(params: APIRequestParams) {
-    const keys = Object.keys(this.defaultParams);
-    const merged: APIRequestParams = {};
-    keys.forEach((key) => {
-      if (Object.prototype.hasOwnProperty.call(params, key)) {
-        merged[key] = params[key];
-      } else {
-        merged[key] = this.defaultParams[key];
-      }
-    });
-    return merged;
+    return Object.assign( {}, this.defaultParams, params );
   }
 
   /**
@@ -132,46 +118,54 @@ export class AlApiClient
    * https://api.global-services.global.alertlogic.com/endpoints/v1/01000001/residency/default/services/incidents/endpoint/ui
    */
   public async getEndpoint(params: APIRequestParams): Promise<AxiosResponse<any>> {
-    const merged = this.mergeParams(params);
+    params = this.mergeParams(params);
     const defaultEndpoint = this.getDefaultEndpoint();
-    const uri = `/endpoints/v1/${merged.account_id}/residency/default/services/${merged.service_name}/endpoint/${merged.endpoint_type}`;
+    const uri = `/endpoints/v1/${params.account_id}/residency/default/services/${params.service_name}/endpoint/${params.endpoint_type}`;
     const testCache = this.cache.get(uri);
     const xhr = this.getAxiosInstance();
     xhr.defaults.baseURL = `https://${defaultEndpoint.global}`;
     if (!testCache) {
-      await xhr.get(uri).then((response) => {
+      this.log(`APIClient:Endpoints: retrieving ${params.service_name}/${params.endpoint_type} from origin`);
+      return await xhr.get(uri).then((response) => {
         const ttl = 15 * 60000; // cache our endpoints response for 15 mins
         this.cache.put(uri, response, ttl);
+        this.log(`APIClient:Endpoints: ${params.service_name}/${params.endpoint_type} is `, response.data );
+        return response;
       });
+    } else {
+      return this.cache.get(uri);
     }
-    return this.cache.get(uri);
   }
 
-  public async createURI(params: APIRequestParams) {
-    const merged = this.mergeParams(params);
-    const queryParams = qs.stringify(merged.params);
+  public async calculateURIFromEndpoints( params: APIRequestParams ):Promise<AlApiTarget> {
+    params = this.mergeParams(params);
+    const queryParams = qs.stringify(params.params);
     const defaultEndpoint = this.getDefaultEndpoint();
-    let fullPath = `/${merged.service_name}/${merged.version}`;
-    if (merged.account_id !== '0') {
-      fullPath = `${fullPath}/${merged.account_id}`;
+    let fullPath = `/${params.service_name}/${params.version}`;
+    if (params.account_id !== '0') {
+      fullPath = `${fullPath}/${params.account_id}`;
     }
-    if (Object.prototype.hasOwnProperty.call(merged, 'path')) {
-      fullPath = `${fullPath}${merged.path}`;
+    if (params.hasOwnProperty('path')) {
+      fullPath = `${fullPath}${params.path}`;
     }
     if (queryParams.length > 0) {
       fullPath = `${fullPath}?${queryParams}`;
     }
-    const endpoint: EndPointResponse = await this.getEndpoint(merged)
-      .then(serviceURI => ({ host: `https://${serviceURI.data[merged.service_name]}`, path: fullPath }))
+    const endpoint: AlApiTarget = await this.getEndpoint(params)
+      .then(serviceURI => ({ host: `https://${serviceURI.data[params.service_name]}`, path: fullPath }))
       .catch(() => ({ host: `https://${defaultEndpoint.global}`, path: fullPath }));
     return endpoint;
+  }
+
+  public async calculateURI(params: APIRequestParams):Promise<AlApiTarget> {
+      return this.calculateURIFromEndpoints( params );
   }
 
   /**
    * Return Cache, or Call for updated data
    */
   public async get(params: APIRequestParams) {
-    const uri = await this.createURI(params);
+    const uri = await this.calculateURI(params);
     let testCache = this.cache.get(uri.path);
     const xhr = this.getAxiosInstance();
     xhr.defaults.baseURL = uri.host;
@@ -183,6 +177,7 @@ export class AlApiClient
     }
     let originalDataResponse = null;
     if (!testCache) {
+      this.log("APIClient::XHR GET %s %s", uri.host, uri.path );
       await xhr.get(uri.path)
         .then((response) => {
           originalDataResponse = response.data;
@@ -204,10 +199,11 @@ export class AlApiClient
    * Post for new data
    */
   async post(params: APIRequestParams) {
-    const uri = await this.createURI(params);
+    const uri = await this.calculateURI(params);
     const xhr = this.getAxiosInstance();
     xhr.defaults.baseURL = uri.host;
     this.cache.del(uri.path);
+    this.log("APIClient::XHR POST %s %s", uri.host, uri.path );
     return await xhr.post(uri.path, params.data)
       .then(response => response.data);
   }
@@ -216,10 +212,11 @@ export class AlApiClient
    * Put for updated data
    */
   async put(params: APIRequestParams) {
-    const uri = await this.createURI(params);
+    const uri = await this.calculateURI(params);
     const xhr = this.getAxiosInstance();
     xhr.defaults.baseURL = uri.host;
     this.cache.del(uri.path);
+    this.log("APIClient::XHR PUT %s %s", uri.host, uri.path );
     return await xhr.put(uri.path, params.data)
       .then(response => response.data);
   }
@@ -235,10 +232,11 @@ export class AlApiClient
    * Delete data
    */
   async delete(params: APIRequestParams) {
-    const uri = await this.createURI(params);
+    const uri = await this.calculateURI(params);
     const xhr = this.getAxiosInstance();
     xhr.defaults.baseURL = uri.host;
     this.cache.del(uri.path);
+    this.log("APIClient::XHR DELETE %s %s", uri.host, uri.path );
     return await xhr.delete(uri.path)
       .then(response => response.data);
   }
@@ -278,15 +276,15 @@ export class AlApiClient
    * Optionally supply an mfa code if the user account is enrolled for Multi-Factor Authentication
    */
   async authenticate( user: string, pass: string, mfa?:string ):Promise<AIMSSessionDescriptor> {
-    const uri = await this.createURI({service_name: 'aims', path: '/authenticate'});
+    const uri = await this.calculateURI({service_name: 'aims', path: '/authenticate'});
     const xhr = this.getAxiosInstance();
     xhr.defaults.baseURL = uri.host;
     xhr.defaults.headers.common.Authorization = `Basic ${this.base64Encode(`${user}:${pass}`)}`;
-    let mfaCode = '';
+    let payload = {};
     if (mfa) {
-      mfaCode = `{ "mfa_code": "${mfa}" }`;
+      payload = { mfa_code: mfa };
     }
-    return xhr.post(uri.path, mfaCode)
+    return xhr.post(uri.path, mfa )
       .then((res) => {
         return res.data;
       });
@@ -298,7 +296,7 @@ export class AlApiClient
    * The session token can be used to complete authentication without re-entering the username and password, but must be used within 3 minutes (token expires)
    */
   async authenticateWithMFASessionToken(token: string, mfa: string):Promise<AIMSSessionDescriptor> {
-    const uri = await this.createURI({service_name: 'aims', path: '/authenticate'});
+    const uri = await this.calculateURI({service_name: 'aims', path: '/authenticate'});
     const xhr = this.getAxiosInstance();
     xhr.defaults.baseURL = uri.host;
     xhr.defaults.headers.common['X-AIMS-Session-Token'] = token;
@@ -333,6 +331,12 @@ export class AlApiClient
       return false;
     }
     return true;
+  }
+
+  private log( text:string, ...otherArgs:any[] ) {
+      if ( this.verbose ) {
+          console.log.apply( console, arguments );
+      }
   }
 }
 
